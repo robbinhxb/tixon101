@@ -1,0 +1,476 @@
+def get_ncbi_tax_ids(organism_name, email):
+    tax_ids = []
+    
+    Entrez.email = email
+    num_try = 1
+    while num_try < 6:
+        try:
+            organism_name_escaped = "\"{}\"".format(organism_name)
+            dom = minidom.parse(Entrez.esearch(db="taxonomy", term=organism_name_escaped))
+            ids = dom.getElementsByTagName('Id')
+            if len(ids) < 1:
+                raise Exception()
+            for tax_id in ids:
+                tax_ids.append(tax_id.firstChild.nodeValue)
+            break
+        except:
+            pass
+        num_try += 1
+        time.sleep(5)
+    
+    return tax_ids
+
+def fetch_gbk(nucl_acc, email, clean_cache = False):
+    cache_folder = "../../preprocessed/cache/cached_gbks/"
+    cache_path = path.join(cache_folder, "{}.gbk".format(nucl_acc))
+
+    if not path.exists(cache_folder):
+        makedirs(cache_folder)
+    
+    if clean_cache or not path.exists(cache_path) or path.getsize(cache_path) < 100:
+        if nucl_acc.startswith("MIBIG.BGC"):
+            [_, bgc_id, cl_id] = nucl_acc.split(".")
+            mibig_final_file_path = "../../inputs/cached_mibig_finalgbks/{}.1.final.gbk".format(bgc_id)
+            with open(mibig_final_file_path, "r") as mibig_final_file:
+                with open(cache_path, "w", encoding="utf-8") as cache_gbk_file:
+                    write_to_file = False
+                    for line in mibig_final_file:
+                        if line.startswith("LOCUS"):
+                            gbk_accession = line.split(" ")[1]
+                            if gbk_accession == "{}.{}".format(bgc_id, cl_id):
+                                write_to_file = True
+                        if write_to_file:
+                            cache_gbk_file.write(line)
+                        if line.rstrip() == "//":
+                            break
+        else: # (re)download from ncbi
+            Entrez.email = email
+            handle = Entrez.efetch(db="nucleotide", id=nucl_acc, rettype="gbwithparts", retmode="text")
+            if not path.exists(cache_folder):
+                makedirs(cache_folder)
+            with open(cache_path, "w") as gbk_file:
+                gbk_file.write(handle.read())
+            
+    return open(cache_path, "r")
+
+# from antismash
+def get_aa_translation(seq_record, feature):
+    """Obtain content for translation qualifier for specific CDS feature in sequence record"""
+    extracted = feature.extract(seq_record.seq).ungap('-')
+
+    # ensure the extracted section is a multiple of three by trimming any excess
+    if len(extracted) % 3 != 0:
+        extracted = extracted[:-(len(extracted) % 3)]
+
+    fasta_seq = extracted.translate(to_stop=True)
+    if len(fasta_seq) == 0:
+        print("Retranslating {} with stop codons".format(feature.id))
+        fasta_seq = extracted.translate()
+
+    # replace ambiguous aminos with an explicit unknown
+    string_version = str(fasta_seq)
+    for bad in "*BJOUZ":
+        string_version = string_version.replace(bad, "X")
+
+    # and remove any gaps
+    string_version = string_version.replace("-", "")
+    fasta_seq = Seq(string_version, generic_protein)
+
+    return fasta_seq
+
+def get_aa_sequence(feature, to_stop=False):
+    """Extract sequence from specific CDS feature in sequence record"""
+    fasta_seq = feature.qualifiers['translation'][0]
+    if "*" in fasta_seq:
+        if to_stop:
+            fasta_seq = fasta_seq.split('*')[0]
+        else:
+            fasta_seq = fasta_seq.replace("*","X")
+    if "-" in fasta_seq:
+        fasta_seq = fasta_seq.replace("-","")
+    return fasta_seq
+
+
+def count_props(input_dict, cur_path, result):
+    """given a (mibig?) json, construct a list of property paths
+    along with its presence count in the json object"""
+    key_path = cur_path
+    
+    if isinstance(input_dict, dict):
+        for key in input_dict.keys():
+            result = count_props(input_dict[key], "{}/{}".format(key_path, key), result)
+    elif isinstance(input_dict, list):
+        key_path = "{}[]".format(key_path)
+        for node in input_dict:
+            result = count_props(node, "{}".format(key_path), result)
+
+    if not isinstance(input_dict, dict):
+        if key_path not in result:
+            result[key_path] = 0
+        result[key_path] += 1
+    
+    return result
+
+
+def fetch_props_new_schema(input_dict, cur_path, result):
+    """given a (mibig?) json draft7 schema, construct a list of property paths
+    along with either required == True for each properties"""
+    key_path = cur_path
+    if ("type" not in input_dict) or (input_dict["type"] not in ["object", "array"]):
+        key_path = "{}".format(cur_path) # string / etc.
+    elif input_dict["type"] == "object":
+        for key in input_dict["properties"]:
+            result = fetch_props_new_schema(input_dict["properties"][key], "{}/{}".format(key_path, key), result)
+    elif input_dict["type"] == "array":
+        key_path = "{}[]".format(cur_path)
+        result = fetch_props_new_schema(input_dict["items"], "{}".format(key_path), result)
+    
+    if key_path not in result and "properties" not in input_dict:
+        result[key_path] = False # can't really use this
+    return result
+
+def sanitise_gene_name(name):
+    if name is None:
+        return None
+    name = str(name)
+    illegal_chars = set("!\"#$%&()*+,:; \r\n\t=>?@[]^`'{|}/ ")
+    for char in set(name).intersection(illegal_chars):
+        name = name.replace(char, "_")
+    return name
+In [4]:
+def fetch_mibig_final_gbk(bgc_id, clean_cache = False):
+    return open("../../inputs/cached_mibig_finalgbks/{}.1.final.gbk".format(bgc_id), "r")
+In [5]:
+def _fetch_val_to_ref(input_dict, parent_dict, key, all_references):
+    if isinstance(input_dict, dict):
+        for key in input_dict.keys():
+            _fetch_val_to_ref(input_dict[key], input_dict, key, all_references)
+    elif isinstance(input_dict, list):
+        for i, node in enumerate(input_dict):
+            _fetch_val_to_ref(node, input_dict, i, all_references)
+    elif isinstance(input_dict, str):
+        if parent_dict != None:
+            valu = input_dict.upper()
+            if valu not in all_references:
+                all_references[valu] = []
+            all_references[valu].append((parent_dict, key))
+    return all_references
+
+with open("../../preprocessed/reports/p7-updated_cases.tsv", "w") as uc:
+    uc.write("")
+    
+def _make_gene_id_match_reference(input_dict, reference_ids, bgc_id):
+    all_references = _fetch_val_to_ref(input_dict, None, None, {})
+    all_rids = {}
+    for rid in reference_ids:
+        if len(rid) > 0:
+            all_rids[rid.upper()] = rid
+    matches = set(all_references.keys()).intersection(set(all_rids.keys()))    
+    for key in matches:
+        for ar in all_references[key]:
+            if ar[0][ar[1]] != all_rids[key]:
+                with open("../../preprocessed/reports/p7-updated_cases.tsv", "a") as uc:
+                    uc.write("{}\t{}\t{}\n".format(bgc_id, ar[0][ar[1]], all_rids[key]))
+                ar[0][ar[1]] = all_rids[key]
+
+def make_gene_id_match_reference(data, reference_ids):
+    bgc_id = data["cluster"]["mibig_accession"]
+    _make_gene_id_match_reference(data["cluster"]["compounds"], reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("genes", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("polyketide", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("nrp", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("ripp", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("terpene", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("saccharide", {}), reference_ids, bgc_id)
+    
+    return data
+In [6]:
+removed_extra_genes = {}
+removed_annotations = {}
+removed_operons = {}
+no_taxid = {}
+added_mibig_genes = {}
+no_gbk = {}
+fixed = {}
+ripps_to_fix = {}
+
+nt_length_and_cds_count = {}
+
+def check_gene_annotations(data):
+    loci = data["cluster"]["loci"]
+    annots = data["cluster"].get("genes", {})
+    gbk_acc = loci["accession"].upper()
+    bgc_id = data["cluster"]["mibig_accession"]
+    email = "mibig@secondarymetabolites.org"
+    gbk_record = None
+    if True:
+        num_try = 1
+        clean_cache = False
+        while num_try < 6:
+            try:
+                with fetch_gbk(gbk_acc, email, clean_cache) as gbk_handle:
+                    seq_record = SeqIO.read(gbk_handle, "genbank") # the gbk should contains only 1 file
+                    if len(seq_record.seq) < 1:
+                        raise Exception("Empty sequence record {}".format(gbk_acc))
+                    gbk_record = seq_record
+                    break
+            except:
+                print("Error...")
+                clean_cache = True
+            num_try += 1
+            time.sleep(5)
+        if not isinstance(gbk_record, SeqRecord): # failed to download NCBI data
+            print("{} Failed to download: {}".format(data["cluster"]["mibig_accession"], gbk_acc))
+            no_gbk[bgc_id] = gbk_acc
+            return {}
+
+    # fill up taxid
+    tax_ids = get_ncbi_tax_ids(gbk_record.annotations["organism"], email)
+    if len(tax_ids) != 1:
+        no_taxid[bgc_id] = gbk_record.annotations["organism"]
+        print(tax_ids)
+    else:
+        data["cluster"]["ncbi_tax_id"] = tax_ids[0]
+        data["cluster"]["organism_name"] = gbk_record.annotations["organism"]
+         def get_ncbi_tax_ids(organism_name, email):
+
+    tax_ids = []
+    
+    Entrez.email = email
+    num_try = 1
+    while num_try < 6:
+        try:
+            organism_name_escaped = "\"{}\"".format(organism_name)
+            dom = minidom.parse(Entrez.esearch(db="taxonomy", term=organism_name_escaped))
+            ids = dom.getElementsByTagName('Id')
+            if len(ids) < 1:
+                raise Exception()
+            for tax_id in ids:
+                tax_ids.append(tax_id.firstChild.nodeValue)
+            break
+        except:
+            pass
+        num_try += 1
+        time.sleep(5)
+    
+    return tax_ids
+
+def fetch_gbk(nucl_acc, email, clean_cache = False):
+    cache_folder = "../../preprocessed/cache/cached_gbks/"
+    cache_path = path.join(cache_folder, "{}.gbk".format(nucl_acc))
+
+    if not path.exists(cache_folder):
+        makedirs(cache_folder)
+    
+    if clean_cache or not path.exists(cache_path) or path.getsize(cache_path) < 100:
+        if nucl_acc.startswith("MIBIG.BGC"):
+            [_, bgc_id, cl_id] = nucl_acc.split(".")
+            mibig_final_file_path = "../../inputs/cached_mibig_finalgbks/{}.1.final.gbk".format(bgc_id)
+            with open(mibig_final_file_path, "r") as mibig_final_file:
+                with open(cache_path, "w", encoding="utf-8") as cache_gbk_file:
+                    write_to_file = False
+                    for line in mibig_final_file:
+                        if line.startswith("LOCUS"):
+                            gbk_accession = line.split(" ")[1]
+                            if gbk_accession == "{}.{}".format(bgc_id, cl_id):
+                                write_to_file = True
+                        if write_to_file:
+                            cache_gbk_file.write(line)
+                        if line.rstrip() == "//":
+                            break
+        else: # (re)download from ncbi
+            Entrez.email = email
+            handle = Entrez.efetch(db="nucleotide", id=nucl_acc, rettype="gbwithparts", retmode="text")
+            if not path.exists(cache_folder):
+                makedirs(cache_folder)
+            with open(cache_path, "w") as gbk_file:
+                gbk_file.write(handle.read())
+            
+    return open(cache_path, "r")
+
+# from antismash
+def get_aa_translation(seq_record, feature):
+    """Obtain content for translation qualifier for specific CDS feature in sequence record"""
+    extracted = feature.extract(seq_record.seq).ungap('-')
+
+    # ensure the extracted section is a multiple of three by trimming any excess
+    if len(extracted) % 3 != 0:
+        extracted = extracted[:-(len(extracted) % 3)]
+
+    fasta_seq = extracted.translate(to_stop=True)
+    if len(fasta_seq) == 0:
+        print("Retranslating {} with stop codons".format(feature.id))
+        fasta_seq = extracted.translate()
+
+    # replace ambiguous aminos with an explicit unknown
+    string_version = str(fasta_seq)
+    for bad in "*BJOUZ":
+        string_version = string_version.replace(bad, "X")
+
+    # and remove any gaps
+    string_version = string_version.replace("-", "")
+    fasta_seq = Seq(string_version, generic_protein)
+
+    return fasta_seq
+
+def get_aa_sequence(feature, to_stop=False):
+    """Extract sequence from specific CDS feature in sequence record"""
+    fasta_seq = feature.qualifiers['translation'][0]
+    if "*" in fasta_seq:
+        if to_stop:
+            fasta_seq = fasta_seq.split('*')[0]
+        else:
+            fasta_seq = fasta_seq.replace("*","X")
+    if "-" in fasta_seq:
+        fasta_seq = fasta_seq.replace("-","")
+    return fasta_seq
+
+
+def count_props(input_dict, cur_path, result):
+    """given a (mibig?) json, construct a list of property paths
+    along with its presence count in the json object"""
+    key_path = cur_path
+    
+    if isinstance(input_dict, dict):
+        for key in input_dict.keys():
+            result = count_props(input_dict[key], "{}/{}".format(key_path, key), result)
+    elif isinstance(input_dict, list):
+        key_path = "{}[]".format(key_path)
+        for node in input_dict:
+            result = count_props(node, "{}".format(key_path), result)
+
+    if not isinstance(input_dict, dict):
+        if key_path not in result:
+            result[key_path] = 0
+        result[key_path] += 1
+    
+    return result
+
+
+def fetch_props_new_schema(input_dict, cur_path, result):
+    """given a (mibig?) json draft7 schema, construct a list of property paths
+    along with either required == True for each properties"""
+    key_path = cur_path
+    if ("type" not in input_dict) or (input_dict["type"] not in ["object", "array"]):
+        key_path = "{}".format(cur_path) # string / etc.
+    elif input_dict["type"] == "object":
+        for key in input_dict["properties"]:
+            result = fetch_props_new_schema(input_dict["properties"][key], "{}/{}".format(key_path, key), result)
+    elif input_dict["type"] == "array":
+        key_path = "{}[]".format(cur_path)
+        result = fetch_props_new_schema(input_dict["items"], "{}".format(key_path), result)
+    
+    if key_path not in result and "properties" not in input_dict:
+        result[key_path] = False # can't really use this
+    return result
+
+def sanitise_gene_name(name):
+    if name is None:
+        return None
+    name = str(name)
+    illegal_chars = set("!\"#$%&()*+,:; \r\n\t=>?@[]^`'{|}/ ")
+    for char in set(name).intersection(illegal_chars):
+        name = name.replace(char, "_")
+    return name
+
+
+In [4]:
+def fetch_mibig_final_gbk(bgc_id, clean_cache = False):
+    return open("../../inputs/cached_mibig_finalgbks/{}.1.final.gbk".format(bgc_id), "r")
+
+
+In [5]:
+def _fetch_val_to_ref(input_dict, parent_dict, key, all_references):
+    if isinstance(input_dict, dict):
+        for key in input_dict.keys():
+            _fetch_val_to_ref(input_dict[key], input_dict, key, all_references)
+    elif isinstance(input_dict, list):
+        for i, node in enumerate(input_dict):
+            _fetch_val_to_ref(node, input_dict, i, all_references)
+    elif isinstance(input_dict, str):
+        if parent_dict != None:
+            valu = input_dict.upper()
+            if valu not in all_references:
+                all_references[valu] = []
+            all_references[valu].append((parent_dict, key))
+    return all_references
+
+with open("../../preprocessed/reports/p7-updated_cases.tsv", "w") as uc:
+    uc.write("")
+    
+def _make_gene_id_match_reference(input_dict, reference_ids, bgc_id):
+    all_references = _fetch_val_to_ref(input_dict, None, None, {})
+    all_rids = {}
+    for rid in reference_ids:
+        if len(rid) > 0:
+            all_rids[rid.upper()] = rid
+    matches = set(all_references.keys()).intersection(set(all_rids.keys()))    
+    for key in matches:
+        for ar in all_references[key]:
+            if ar[0][ar[1]] != all_rids[key]:
+                with open("../../preprocessed/reports/p7-updated_cases.tsv", "a") as uc:
+                    uc.write("{}\t{}\t{}\n".format(bgc_id, ar[0][ar[1]], all_rids[key]))
+                ar[0][ar[1]] = all_rids[key]
+
+def make_gene_id_match_reference(data, reference_ids):
+    bgc_id = data["cluster"]["mibig_accession"]
+    _make_gene_id_match_reference(data["cluster"]["compounds"], reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("genes", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("polyketide", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("nrp", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("ripp", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("terpene", {}), reference_ids, bgc_id)
+    _make_gene_id_match_reference(data["cluster"].get("saccharide", {}), reference_ids, bgc_id)
+    
+    return data
+
+
+In [6]:
+removed_extra_genes = {}
+removed_annotations = {}
+removed_operons = {}
+no_taxid = {}
+added_mibig_genes = {}
+no_gbk = {}
+fixed = {}
+ripps_to_fix = {}
+
+nt_length_and_cds_count = {}
+
+def check_gene_annotations(data):
+    loci = data["cluster"]["loci"]
+    annots = data["cluster"].get("genes", {})
+    gbk_acc = loci["accession"].upper()
+    bgc_id = data["cluster"]["mibig_accession"]
+    email = "mibig@secondarymetabolites.org"
+    gbk_record = None
+    if True:
+        num_try = 1
+        clean_cache = False
+        while num_try < 6:
+            try:
+                with fetch_gbk(gbk_acc, email, clean_cache) as gbk_handle:
+                    seq_record = SeqIO.read(gbk_handle, "genbank") # the gbk should contains only 1 file
+                    if len(seq_record.seq) < 1:
+                        raise Exception("Empty sequence record {}".format(gbk_acc))
+                    gbk_record = seq_record
+                    break
+            except:
+                print("Error...")
+                clean_cache = True
+            num_try += 1
+            time.sleep(5)
+        if not isinstance(gbk_record, SeqRecord): # failed to download NCBI data
+            print("{} Failed to download: {}".format(data["cluster"]["mibig_accession"], gbk_acc))
+            no_gbk[bgc_id] = gbk_acc
+            return {}
+
+    # fill up taxid
+    tax_ids = get_ncbi_tax_ids(gbk_record.annotations["organism"], email)
+    if len(tax_ids) != 1:
+        no_taxid[bgc_id] = gbk_record.annotations["organism"]
+        print(tax_ids)
+    else:
+        data["cluster"]["ncbi_tax_id"] = tax_ids[0]
+        data["cluster"]["organism_name"] = gbk_record.annotations["organism"]
+         
